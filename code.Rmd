@@ -1,0 +1,809 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+# Motivation & Introduction
+Environment has become a major concern recent years, and forest fires are one of the serious environment issues. In this project, data about forest fires in Portugal are analyzed. Numerical predictor variables such as tempurature, rain, wind speed and categorical variables such as month and day are included in this dataset, and are used to predict the burned area of the forest in a wildfire. 
+
+To achieve our goal, after preprocessing the data, we fit four models including smoothing spline, random forest, gradient boosting and generalized linear model based on the given data. In model selection part, we try to provide evidence why or why not the model is a good fit and select the best candidate in conclusion.
+
+# Data
+Our data is from UCI Machine Learning Repository. Below are all variables included in the dataset and their value range.   
+
+## 1. Input variable
+
+* \texttt{X} - x-axis spatial coordinate within the Montesinho park map: 1-9
+* \texttt{Y} - y-axis spatial coordinate within the Montesinho park map: 2-9
+* \texttt{month} - month of the year: "jan"-"dec"
+* \texttt{day} - day of the week: "mon"-"sun"
+* \texttt{FFMC} - Fine Fuel Moisture Code (FFMC) index from Fire Weather Index (FWI) system: 18.70-96.20
+* \texttt{DMC} - Duff Moisture Code (DMC) index from FWI system: 1.1-291.3
+* \texttt{DC} - Drought Code (DC) index from FWI system: 7.9-860.6
+* \texttt{ISI} - Initial Spread Index (ISI) index from FWI system: 0.00-56.10
+* \texttt{temp} - temperature in Celsius degrees: 2.20-33.30
+* \texttt{RH} - relative humidity in %: 15.0-100.0
+* \texttt{wind} - wind speed in km/h: 0.40-9.40
+* \texttt{rain} - outside rain in mm/m2: 0.0-6.4
+
+## 2. Output variable
+
+* \texttt{area} - the burned area of the forest in ha: 0.00-1090.84
+
+The following information may provide a general idea about the data.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+forest <- read.csv("forestfires.csv", head=TRUE)
+```
+
+```{r, echo=FALSE}
+summary(forest)
+```
+
+# Preprocessing
+In preprocessing part, we create dummies for categorical vairables(month and day), and perform mean std normalization to the dataset.
+
+```{r, echo=FALSE}
+forest <- data.frame(scale(model.matrix(area ~ ., forest)[,-1]), forest$area)
+
+colnames(forest)[28] <- "area"
+
+X = forest[1:27]
+y = forest[28]
+```
+
+Since most of our responsable variables are 0, our data is very skewed, we apply a log transformation to our response variable.
+
+```{r, echo=FALSE, fig.height=4, fig.width=10}
+par(mfrow=c(1,2))
+hist(forest$area, main="Forest Area", xlab="Area")
+hist(log(forest$area + 1), main="Forest Area", xlab="log(Area + 1)")
+```
+
+# Model Fitting and Model Selection
+
+To fully compare the performances of each model, we put process time into consideration, and also employ the Root-Mean-Squared Error(RMSE), which can be calculated as
+$$
+RMSE = \sqrt{\frac{\sum_{i=1}^n (\hat{y_i} - y_i)^2}{n}}
+$$
+We use a 5-fold corss-validation to obtain the average RMSE.
+
+## smoothing spline
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(caret)
+# 5 folds
+seed = 100
+set.seed(seed)
+flds <- createFolds(seq(1,nrow(y),1), k = 5, list = TRUE, returnTrain = FALSE)
+
+rf_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(rf_cv_importance) <- colnames(forest)[1:27]
+gbm_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(gbm_cv_importance) <- colnames(forest)[1:27]
+glm_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(glm_cv_importance) <- colnames(forest)[1:27]
+
+rf_cv_rmse = rep(0,5)
+gbm_cv_rmse = rep(0,5)
+glm_cv_rmse = rep(0,5)
+sp_cv_rmse = rep(0,5)
+sp_cv_AIC = rep(0, 5)
+sp2_cv_rmse = rep(0,5)
+sp2_cv_AIC = rep(0, 5)
+sp3_cv_rmse = rep(0,5)
+sp3_cv_AIC = rep(0, 5)
+```
+
+When trying to fit the dataset into smoothing splines, we choose three different models. The main difference among the models is the variables that are considered to have an interaction effect on the dataset.
+
+### Model 1: No interaction effects
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(mgcv)
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                  monthaug + 
+                  monthdec + monthfeb + 
+                  monthjan + monthjul + 
+                  monthjun + monthmar + 
+                  monthmay + monthnov + 
+                  monthoct + monthsep + 
+                  daymon +   daysat + 
+                  daysun + daythu + 
+                  daytue + daywed + 
+                  s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                  s(temp) + s(RH) + s(wind) + 
+                  s(rain, k=5), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred = exp(predict(sp.model, newdata=forest[flds[[i]],])) - 1
+  sp_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - sp_pred)^2) / nrow(forest))
+  sp_cv_AIC[i] = AIC(sp.model)
+}
+  # Stop the clock
+  sp_time = proc.time() - start.time
+sp.model$call
+```
+
+
+### Model 2: Interaction effect considered between temp, RH, wind and rain
+
+```{r, echo=FALSE}
+# interaction
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model2 <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                  monthaug + 
+                  monthdec + monthfeb + 
+                  monthjan + monthjul + 
+                  monthjun + monthmar + 
+                  monthmay + monthnov + 
+                  monthoct + monthsep + 
+                  daymon +   daysat + 
+                  daysun + daythu + 
+                  daytue + daywed + 
+                  s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                  s(temp) + s(RH) + s(wind) + 
+                  s(rain, k=5) + ti(temp, RH, wind, rain), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred2 = exp(predict(sp.model2, newdata=forest[flds[[i]],])) - 1
+  sp2_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - sp_pred2)^2) / nrow(forest))
+  sp2_cv_AIC[i] = AIC(sp.model2)
+}
+  # Stop the clock
+  sp2_time = proc.time() - start.time
+sp.model2$call
+```
+
+
+### Model 3: Interaction effect considered between FFMC and DMC
+
+```{r, echo=FALSE}
+# interaction
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model3 <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                   monthaug + 
+                   monthdec + monthfeb + 
+                   monthjan + monthjul + 
+                   monthjun + monthmar + 
+                   monthmay + monthnov + 
+                   monthoct + monthsep + 
+                   daymon +   daysat + 
+                   daysun + daythu + 
+                   daytue + daywed + 
+                   s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                   s(temp) + s(RH) + s(wind) + 
+                   s(rain, k=5) + ti(FFMC, DMC), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred3 = exp(predict(sp.model3, newdata=forest[flds[[i]],])) - 1
+  sp3_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area- sp_pred3)^2) / nrow(forest))
+  sp3_cv_AIC[i] = AIC(sp.model3)
+}
+  # Stop the clock
+  sp3_time = proc.time() - start.time
+sp.model3$call
+```
+
+
+
+To compare the three models and find the best one, we take RMSE,AIC and Run Time into consideration. The three scores for the three models respectively are calculated as below:
+
+```{r, echo=FALSE}
+sp_cv_overall_rmse = sqrt((sp_cv_rmse[1]^2 + sp_cv_rmse[2]^2 + sp_cv_rmse[3]^2 +
+                             sp_cv_rmse[4]^2 + sp_cv_rmse[5]^2)/5)
+sp2_cv_overall_rmse = sqrt((sp2_cv_rmse[1]^2 + sp2_cv_rmse[2]^2 + sp2_cv_rmse[3]^2 +
+                              sp2_cv_rmse[4]^2 + sp2_cv_rmse[5]^2)/5)
+sp3_cv_overall_rmse = sqrt((sp3_cv_rmse[1]^2 + sp3_cv_rmse[2]^2 + sp3_cv_rmse[3]^2 +
+                             sp3_cv_rmse[4]^2 + sp3_cv_rmse[5]^2)/5)
+```
+
+
+```{r, echo=FALSE}
+sp.eval <- data.frame(RMSE = integer(3), AIC = integer(3), ProcessTime = integer(3))
+
+sp.eval$RMSE <- c(sprintf("%.3f(+/-)%.3f", mean(sp_cv_rmse), sd(sp_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp2_cv_rmse), sd(sp2_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp3_cv_rmse), sd(sp3_cv_rmse)))
+sp.eval$AIC <- c(sprintf("%.3f(+/-)%.3f", mean(sp_cv_AIC), sd(sp_cv_AIC)),
+                 sprintf("%.3f(+/-)%.3f", mean(sp2_cv_AIC), sd(sp2_cv_AIC)),
+                 sprintf("%.3f(+/-)%.3f", mean(sp3_cv_AIC), sd(sp3_cv_AIC)))
+sp.eval$ProcessTime <- c(sp_time[3], sp2_time[3], sp3_time[3])
+rownames(sp.eval) <- c("model1", "model2", "model3")
+library(knitr)
+kable(sp.eval)
+```
+
+We can also check if the model is a good fit by looking at the residuals of it.
+
+### Model 1: No interaction effects
+
+```{r, echo=FALSE}
+gam.check(sp.model)
+```
+
+### Model 2: Interaction effect considered between temp, RH, wind and rain
+
+```{r, echo=FALSE}
+gam.check(sp.model2)
+```
+
+### Model 3: Interaction effect considered between FFMC and DMC
+
+```{r, echo=FALSE}
+gam.check(sp.model3)
+```
+
+In general, model 3 has the largest value for both RMSE and AIC values, therefore model 3 is no longer considered. The two scores for model 1 and model 2 are quite close. Model 2 has smaller RMSE and AIC score compared with model 1, which means it is better in performance. But the process time increases as the number of interaction term increases, which is a lot of computationally cost when the size of dataset grows large. Although model 2 takes longer to process, but it does improve the level of fitness to the data. Overall, we consider model 2 as the best model among the three smoothing spline models.
+
+## Random Forest
+Second, we use random forests on our data. The hyperparameter $m_{try}$ is optimized using the \texttt{tuneRF} function from the $randomForest$ package in **R**. Below is a graph for OOB error is plotted to illustrate our optimizing result.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results='hide', fig.keep='all'}
+library(randomForest)
+
+# tuning hypterparameter
+seed = 100
+set.seed(seed)
+bestmtry <- tuneRF(data.matrix(X), log(data.matrix(y)+1), stepFactor=1.5, improve=1e-5, ntree=500, trace=FALSE, do.trace=FALSE)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  # rf model
+  rf.model = randomForest(log(area+1) ~ ., data=forest[-flds[[i]],], mtry=2, ntree=500)
+  
+  # rf variable importance
+  rf.importance <- importance(rf.model)
+  rf_cv_importance[,i] <- rf.importance
+
+  # prediction & RMSE
+  rf_pred = exp(predict(rf.model, newdata = forest[flds[[i]],])) - 1
+  rf_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - rf_pred)^2) / nrow(forest))
+}
+  # Stop the clock
+  rf_time = proc.time() - start.time
+```
+
+From the graph above, we can see that the smallest OOB error is achieved when \texttt{$m_{try}$}=2. Therefore, we take this value into our Random Forest model for the cross-validation step.
+
+To evaluate this model, we also calculate its RMSE:
+
+```{r, echo=FALSE}
+# overall RMSE
+rf_cv_overall_rmse = sqrt((rf_cv_rmse[1]^2 + rf_cv_rmse[2]^2 + rf_cv_rmse[3]^2 +
+                            rf_cv_rmse[4]^2 + rf_cv_rmse[5]^2)/5)
+print(paste("Random Forest RMSE: ", mean(rf_cv_rmse), "(+/-)", sd(rf_cv_rmse)))
+```
+
+Compared to that of the smoothing spline model, the RMSE of this random forests model is quite small and less spread out.
+
+For random forests model, we are also interested in its importance of variables.
+
+```{r, echo=FALSE}
+# Importance plot
+library(ggplot2)
+rf_mean_importance <- data.frame(rowMeans(rf_cv_importance))
+vi1 <- ggplot(rf_mean_importance, 
+              aes(x=row.names(rf_mean_importance), 
+                  y=rowMeans.rf_cv_importance.)) +
+         geom_bar(stat="identity") +
+         labs(title="RandomForest Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = rowMeans.rf_cv_importance. - apply(rf_cv_importance, 1, sd),
+                           ymax = rowMeans.rf_cv_importance. + apply(rf_cv_importance, 1, sd))) +
+         coord_flip()
+vi1
+```
+
+To show this in a ascending order of variable importance:
+```{r, echo=FALSE}
+kable(rf_mean_importance[order(rf_mean_importance), , drop=FALSE])
+```
+
+
+We can clearly see that temperature leads the importance of all variables, which is quite reasonable, followed by weather factors like relative humidity and wind, and the four factors from the FWI system. X and Y coordinates have relatively high importance, which implies that the surroundings or the geography of the specific loaction has some effect on the burned area. Month and day have smaller impacts, and so does rain, which is quite surprising.
+
+## Gradient Boosting
+Next, we use gradient boosting method on the data.   
+
+In order to tune hyperparameters, we used a gridsearach for the following hyperparameters, with parameter settings specified as follows:
+
+* \texttt{n.trees}: [100, 200, 300]
+* \texttt{interaction.depth}: [2, 4, 6]
+* \texttt{shrinkage}: [0.01, 0.1, 1.0]
+
+These are our best hyperparameters:
+
+* \texttt{n.trees}: 100
+* \texttt{interaction.depth}: 2
+* \texttt{shrinkage}: 0.01
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.show = 'hide', results='hide'}
+library(gbm)
+
+# tuning hyperparameter
+control <- trainControl(method="repeatedcv", number=5, repeats=1)
+metric <- "RMSE"
+tunegrid <- expand.grid(n.trees=c(100, 200, 300), interaction.depth = c(2, 4, 6),
+                        shrinkage=c(0.01, 0.1, 1.0), n.minobsinnode = 10)
+
+gbm_grid_seach = train(log(area+1) ~ ., data=forest, method="gbm", metric=metric, 
+                       tuneGrid=tunegrid, trControl=control)
+
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  # gbm model
+  gbm.model <- gbm(log(area+1) ~., distribution = "gaussian", data=forest[-flds[[i]],], n.trees = 100, 
+                 interaction.depth = 2, shrinkage = 0.01, n.minobsinnode = 10)
+
+  # gbm prediction & RMSE
+  gbm_pred = exp(predict(gbm.model, n.trees=100, newdata = forest[flds[[i]],])) -1
+  gbm_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - gbm_pred)^2) / nrow(forest))
+
+  # gbm variable importance
+  gbm.importance <- summary(gbm.model)
+  gbm_cv_importance[,i] = gbm.importance[row.names(gbm_cv_importance),]$rel.inf
+}
+  # Stop the clock
+  gbm_time = proc.time() - start.time
+```
+
+
+To further investigate this model, we first calculate the RMSE value as well:
+
+```{r, echo=FALSE}
+gbm_cv_overall_rmse = sqrt((gbm_cv_rmse[1]^2 + gbm_cv_rmse[2]^2 + gbm_cv_rmse[3]^2 +
+                             gbm_cv_rmse[4]^2 + gbm_cv_rmse[5]^2)/5)
+print(paste("Gradient Boosting RMSE: ", mean(gbm_cv_rmse), "(+/-)", sd(gbm_cv_rmse)))
+```
+
+We can see that RMSE value for gradient boosting method is also relatively small, which means it might be a good fit for this dataset.
+
+We are also interested in the important variables produced by this model:
+
+```{r, echo=FALSE}
+# Importance plot
+gbm_mean_importance <- data.frame(rowMeans(gbm_cv_importance))
+vi2 <- ggplot(gbm_mean_importance, 
+              aes(x=row.names(gbm_mean_importance), 
+                  y=rowMeans.gbm_cv_importance.)) +
+         geom_bar(stat="identity") +
+         labs(title="Gradient Boosting Method Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = rowMeans.gbm_cv_importance. - apply(gbm_cv_importance, 1, sd),
+                           ymax = rowMeans.gbm_cv_importance. + apply(gbm_cv_importance, 1, sd))) +
+         coord_flip()
+vi2
+```
+
+Re-order this graph and put it in numerical style:
+
+```{r, echo=FALSE}
+kable(gbm_mean_importance[order(gbm_mean_importance), , drop=FALSE])
+```
+
+From the information above, we can tell that the results are similar to those of random forests model. Month, day and rain still have the smallest influence on the output. Temperature still has the highest influence, followed by location, wind, humidity and factors from the FWI system.
+
+## Generalized Linear Model
+Finally, we use generalized linear model on our data. The default parameter settings from **glm** function are used.
+
+```{r, echo=FALSE, warning=FALSE}
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  glm.model <- glm(log(area+1) ~ ., data = forest[-flds[[i]],], family = gaussian(link = "identity"))
+
+  # prediction & RMSE
+  glm_pred = exp(predict(glm.model, newdata=forest[flds[[i]],])) - 1
+  glm_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - glm_pred)^2) / nrow(forest))
+
+  # Importance
+  glm.importace = coef(glm.model)[-1]
+  glm_cv_importance[,i] <- glm.importace
+}
+  # Stop the clock
+  glm_time = proc.time() - start.time
+```
+
+To further analyze the fitness of the model, we use its RMSE as the prediction error:
+
+```{r, echo=FALSE}
+# overall RMSE
+glm_cv_overall_rmse = sqrt((glm_cv_rmse[1]^2 + glm_cv_rmse[2]^2 + glm_cv_rmse[3]^2 +
+                              glm_cv_rmse[4]^2 + glm_cv_rmse[5]^2)/5)
+print(paste("Logistic Regression RMSE: ", mean(glm_cv_rmse), "(+/-)", sd(glm_cv_rmse)))
+```
+
+We are also interested in the important variables produced by this model:
+
+```{r, echo=FALSE}
+# Importance plot
+glm_mean_importance <- data.frame(rowMeans(glm_cv_importance, na.rm=TRUE))
+vi3 <- ggplot(glm_mean_importance, 
+             aes(x=row.names(glm_mean_importance), 
+                  y=rowMeans(glm_cv_importance, na.rm=TRUE))) +
+         geom_bar(stat="identity") +
+         labs(title="GLM Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = glm_mean_importance - 
+                             apply(glm_cv_importance, 1, function(x) {sd(x, na.rm=TRUE)}),
+                           ymax = glm_mean_importance + 
+                             apply(glm_cv_importance, 1, function(x) {sd(x, na.rm=TRUE)}))) +
+          coord_flip()
+vi3
+```
+
+From the graph above, we can tell that the variable importance of GLM is quite different from that of random forests model and gradient boosting method. Temperature no longer has the highest influence. Instead, month September leads the variable importance. Wind, temperature, humidity and factors from the FWI system have less importance than they do in the previous two models. Some of the months have great influence on the model, but other months do not. Days of the week still have small importance in the model fitting.
+
+# Statisitcal Conclusions
+To compare the models above and select the best candidate, factors that we consider are the RMSE value and process time of each model. Note that for smoothing spline, we use model 2 out of the 3 smoothing splines in comparison as we discussed this selection in the smoothing spline part above.
+
+```{r, echo=FALSE}
+model_eval <- data.frame(RMSE = integer(4), ProcessTime = integer(4))
+model_eval$RMSE <- c(sprintf("%.3f(+/-)%.3f", mean(rf_cv_rmse), sd(rf_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(gbm_cv_rmse), sd(gbm_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp2_cv_rmse), sd(sp2_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(glm_cv_rmse), sd(glm_cv_rmse)))
+
+model_eval$ProcessTime <- c(rf_time[3], gbm_time[3], sp2_time[3], glm_time[3])
+rownames(model_eval) <- c("Random Forest", "Gradient Boosting", 
+                          "Smoothing Spline", "Generalized Linear Model")
+
+kable(model_eval)
+```
+
+From the table above, smoothing spline model has the largest RMSE value and the longest process time, and the RMSE values for the rest three models are quite close. We decide to pick the best candidate with repect to RMSE value. Therefore, random forests model, which has the smallest RMSE value, becomes our best candidate.
+
+# Conclusions in the Context
+Although random forests model is our best candidate among these four models, it does not mean that random forests model is the true model for this dataset. What we might be able to conclude is which input variables have larger influence on model fitting and which have smaller influence. 
+
+```{r, echo=FALSE}
+# combined vi graph
+vi1
+vi2
+vi3
+```
+
+From the graph above, we consider that temperature has the greatest influence on model fitting. Other factors that have high influence are relative humidity, wind, four factors from FWI system(ISI, FFMC, DMC and DC) and location of the forest fire. All of them are considered to be positively correlated to the burned area. Factors that have very small or even no influence are rain, month, and day (of the week).
+
+# Future Work
+After conducting the above modeling and analysis, our final model (random forests model) is still not a true model for this dataset. However, based on the information above, we can find a direction to improve the model. One way may be to reduce the weight of less important factors when modeling. Moreover, there are other factors affecting the burned area of forest that have not been considered in this dataset, such as the amount of combustible and the oxygen content in the forest. With data collected for these factors, the prediction of models may be more precise. Some other machine-learning models can be tested, such as Ridge Regression, Neural Network, etc.
+
+# Contribution
+Data collection: Chen Yuan
+
+Data Cleaning: Chen Yuan
+
+Modeling: Chen Yuan
+
+Model selection: Miaojia Pu
+        
+Analysis: Yuke Wu; Chen Yuan
+
+Report Writing: Yuke Wu
+
+\newpage
+# Appendix
+
+## Data
+link: https://archive.ics.uci.edu/ml/datasets/Forest+Fires
+
+## Literature
+In the paper listed in reference, the output variable was first applied a log transformation to, and the inverse of the transformation after several Data Mining methods were conducted. 10-fold cross-validation and 30 runs were used during the experiments. The best candidate was picked with respect to MAD and RMSE. The Support Vector Machines (SVM) model was found to predict small fires better, which are the majority forest fires.
+SVM model: 
+$$
+\hat{y} = w_0 + \sum_{i=1}^nw_i\phi_i(x)
+$$
+where $$\phi_i(x)$$ represents a nonlinear transformation, according to the kernal function $$K(x,x') = \sum_{i=1}^m\phi_i(x)\phi_i(x')$$.
+
+## Code
+```{r, eval=FALSE, tidy=TRUE}
+forest <- read.csv("forestfires.csv", head=TRUE)
+
+summary(forest)
+
+forest <- data.frame(scale(model.matrix(area ~ ., forest)[,-1]), forest$area)
+
+colnames(forest)[28] <- "area"
+
+X = forest[1:27]
+y = forest[28]
+
+par(mfrow=c(1,2))
+hist(forest$area, main="Forest Area", xlab="Area")
+hist(log(forest$area + 1), main="Forest Area", xlab="log(Area + 1)")
+
+library(caret)
+  # 5 folds
+seed = 100
+set.seed(seed)
+flds <- createFolds(seq(1,nrow(y),1), k = 5, list = TRUE, returnTrain = FALSE)
+
+rf_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(rf_cv_importance) <- colnames(forest)[1:27]
+gbm_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(gbm_cv_importance) <- colnames(forest)[1:27]
+glm_cv_importance = matrix(rep(0, 5*27), ncol=5)
+row.names(glm_cv_importance) <- colnames(forest)[1:27]
+
+rf_cv_rmse = rep(0,5)
+gbm_cv_rmse = rep(0,5)
+glm_cv_rmse = rep(0,5)
+sp_cv_rmse = rep(0,5)
+sp_cv_AIC = rep(0, 5)
+sp2_cv_rmse = rep(0,5)
+sp2_cv_AIC = rep(0, 5)
+sp3_cv_rmse = rep(0,5)
+sp3_cv_AIC = rep(0, 5)
+
+library(mgcv)
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                  monthaug + 
+                  monthdec + monthfeb + 
+                  monthjan + monthjul + 
+                  monthjun + monthmar + 
+                  monthmay + monthnov + 
+                  monthoct + monthsep + 
+                  daymon +   daysat + 
+                  daysun + daythu + 
+                  daytue + daywed + 
+                  s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                  s(temp) + s(RH) + s(wind) + 
+                  s(rain, k=5), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred = exp(predict(sp.model, newdata=forest[flds[[i]],])) - 1
+  sp_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - sp_pred)^2) / nrow(forest))
+  sp_cv_AIC[i] = AIC(sp.model)
+}
+  # Stop the clock
+  sp_time = proc.time() - start.time
+sp.model$call
+
+  # interaction
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model2 <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                  monthaug + 
+                  monthdec + monthfeb + 
+                  monthjan + monthjul + 
+                  monthjun + monthmar + 
+                  monthmay + monthnov + 
+                  monthoct + monthsep + 
+                  daymon +   daysat + 
+                  daysun + daythu + 
+                  daytue + daywed + 
+                  s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                  s(temp) + s(RH) + s(wind) + 
+                  s(rain, k=5) + ti(temp, RH, wind, rain), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred2 = exp(predict(sp.model2, newdata=forest[flds[[i]],])) - 1
+  sp2_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - sp_pred2)^2) / nrow(forest))
+  sp2_cv_AIC[i] = AIC(sp.model2)
+}
+  # Stop the clock
+  sp2_time = proc.time() - start.time
+sp.model2$call
+
+  # interaction
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  sp.model3 <- gam(log(area + 1) ~ s(X, k=9) + s(Y, k=6) + 
+                   monthaug + 
+                   monthdec + monthfeb + 
+                   monthjan + monthjul + 
+                   monthjun + monthmar + 
+                   monthmay + monthnov + 
+                   monthoct + monthsep + 
+                   daymon +   daysat + 
+                   daysun + daythu + 
+                   daytue + daywed + 
+                   s(FFMC) + s(DMC) + s(DC) + s(ISI) + 
+                   s(temp) + s(RH) + s(wind) + 
+                   s(rain, k=5) + ti(FFMC, DMC), data=forest[-flds[[i]],])
+  # prediction & RMSE
+  sp_pred3 = exp(predict(sp.model3, newdata=forest[flds[[i]],])) - 1
+  sp3_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area- sp_pred3)^2) / nrow(forest))
+  sp3_cv_AIC[i] = AIC(sp.model3)
+}
+  # Stop the clock
+  sp3_time = proc.time() - start.time
+sp.model3$call
+
+sp_cv_overall_rmse = sqrt((sp_cv_rmse[1]^2 + sp_cv_rmse[2]^2 + sp_cv_rmse[3]^2 +
+                             sp_cv_rmse[4]^2 + sp_cv_rmse[5]^2)/5)
+sp2_cv_overall_rmse = sqrt((sp2_cv_rmse[1]^2 + sp2_cv_rmse[2]^2 + sp2_cv_rmse[3]^2 +
+                              sp2_cv_rmse[4]^2 + sp2_cv_rmse[5]^2)/5)
+sp3_cv_overall_rmse = sqrt((sp3_cv_rmse[1]^2 + sp3_cv_rmse[2]^2 + sp3_cv_rmse[3]^2 +
+                             sp3_cv_rmse[4]^2 + sp3_cv_rmse[5]^2)/5)
+                             
+sp.eval <- data.frame(RMSE = integer(3), AIC = integer(3), ProcessTime = integer(3))
+
+sp.eval$RMSE <- c(sprintf("%.3f(+/-)%.3f", mean(sp_cv_rmse), sd(sp_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp2_cv_rmse), sd(sp2_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp3_cv_rmse), sd(sp3_cv_rmse)))
+sp.eval$AIC <- c(sprintf("%.3f(+/-)%.3f", mean(sp_cv_AIC), sd(sp_cv_AIC)),
+                 sprintf("%.3f(+/-)%.3f", mean(sp2_cv_AIC), sd(sp2_cv_AIC)),
+                 sprintf("%.3f(+/-)%.3f", mean(sp3_cv_AIC), sd(sp3_cv_AIC)))
+sp.eval$ProcessTime <- c(sp_time[3], sp2_time[3], sp3_time[3])
+rownames(sp.eval) <- c("model1", "model2", "model3")
+library(knitr)
+kable(sp.eval)
+
+gam.check(sp.model)
+
+gam.check(sp.model2)
+
+gam.check(sp.model3)
+
+library(randomForest)
+
+  # tuning hypterparameter
+seed = 100
+set.seed(seed)
+bestmtry <- tuneRF(data.matrix(X), log(data.matrix(y)+1), stepFactor=1.5, improve=1e-5, ntree=500, trace=FALSE, do.trace=FALSE)
+
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  # rf model
+  rf.model = randomForest(log(area+1) ~ ., data=forest[-flds[[i]],], mtry=2, ntree=500)
+  
+  # rf variable importance
+  rf.importance <- importance(rf.model)
+  rf_cv_importance[,i] <- rf.importance
+
+  # prediction & RMSE
+  rf_pred = exp(predict(rf.model, newdata = forest[flds[[i]],])) - 1
+  rf_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - rf_pred)^2) / nrow(forest))
+}
+  # Stop the clock
+  rf_time = proc.time() - start.time
+  
+  # overall RMSE
+rf_cv_overall_rmse = sqrt((rf_cv_rmse[1]^2 + rf_cv_rmse[2]^2 + rf_cv_rmse[3]^2 +
+                            rf_cv_rmse[4]^2 + rf_cv_rmse[5]^2)/5)
+print(paste("Random Forest RMSE: ", mean(rf_cv_rmse), "(+/-)", sd(rf_cv_rmse)))
+
+  # Importance plot
+library(ggplot2)
+rf_mean_importance <- data.frame(rowMeans(rf_cv_importance))
+vi1 <- ggplot(rf_mean_importance, 
+              aes(x=row.names(rf_mean_importance), 
+                  y=rowMeans.rf_cv_importance.)) +
+         geom_bar(stat="identity") +
+         labs(title="RandomForest Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = rowMeans.rf_cv_importance. - apply(rf_cv_importance, 1, sd),
+                           ymax = rowMeans.rf_cv_importance. + apply(rf_cv_importance, 1, sd))) +
+         coord_flip()
+vi1
+
+kable(rf_mean_importance[order(rf_mean_importance), , drop=FALSE])
+
+library(gbm)
+
+  # tuning hyperparameter
+control <- trainControl(method="repeatedcv", number=5, repeats=1)
+metric <- "RMSE"
+tunegrid <- expand.grid(n.trees=c(100, 200, 300), interaction.depth = c(2, 4, 6),
+                        shrinkage=c(0.01, 0.1, 1.0), n.minobsinnode = 10)
+
+gbm_grid_seach = train(log(area+1) ~ ., data=forest, method="gbm", metric=metric, 
+                       tuneGrid=tunegrid, trControl=control)
+
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  # gbm model
+  gbm.model <- gbm(log(area+1) ~., distribution = "gaussian", data=forest[-flds[[i]],], n.trees = 100, 
+                 interaction.depth = 2, shrinkage = 0.01, n.minobsinnode = 10)
+
+  # gbm prediction & RMSE
+  gbm_pred = exp(predict(gbm.model, n.trees=100, newdata = forest[flds[[i]],])) -1
+  gbm_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - gbm_pred)^2) / nrow(forest))
+
+  # gbm variable importance
+  gbm.importance <- summary(gbm.model)
+  gbm_cv_importance[,i] = gbm.importance[row.names(gbm_cv_importance),]$rel.inf
+}
+  # Stop the clock
+  gbm_time = proc.time() - start.time
+  
+gbm_cv_overall_rmse = sqrt((gbm_cv_rmse[1]^2 + gbm_cv_rmse[2]^2 + gbm_cv_rmse[3]^2 +
+                             gbm_cv_rmse[4]^2 + gbm_cv_rmse[5]^2)/5)
+print(paste("Gradient Boosting RMSE: ", mean(gbm_cv_rmse), "(+/-)", sd(gbm_cv_rmse)))
+
+  # Importance plot
+gbm_mean_importance <- data.frame(rowMeans(gbm_cv_importance))
+vi2 <- ggplot(gbm_mean_importance, 
+              aes(x=row.names(gbm_mean_importance), 
+                  y=rowMeans.gbm_cv_importance.)) +
+         geom_bar(stat="identity") +
+         labs(title="Gradient Boosting Method Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = rowMeans.gbm_cv_importance. - apply(gbm_cv_importance, 1, sd),
+                           ymax = rowMeans.gbm_cv_importance. + apply(gbm_cv_importance, 1, sd))) +
+         coord_flip()
+vi2
+
+kable(gbm_mean_importance[order(gbm_mean_importance), , drop=FALSE])
+
+  # Start the clock
+  start.time <- proc.time()
+for (i in 1:5) {
+  glm.model <- glm(log(area+1) ~ ., data = forest[-flds[[i]],], family = gaussian(link = "identity"))
+
+  # prediction & RMSE
+  glm_pred = exp(predict(glm.model, newdata=forest[flds[[i]],])) - 1
+  glm_cv_rmse[i] = sqrt(sum((forest[flds[[i]],]$area - glm_pred)^2) / nrow(forest))
+
+  # Importance
+  glm.importace = coef(glm.model)[-1]
+  glm_cv_importance[,i] <- glm.importace
+}
+  # Stop the clock
+  glm_time = proc.time() - start.time
+  
+  # overall RMSE
+glm_cv_overall_rmse = sqrt((glm_cv_rmse[1]^2 + glm_cv_rmse[2]^2 + glm_cv_rmse[3]^2 +
+                              glm_cv_rmse[4]^2 + glm_cv_rmse[5]^2)/5)
+print(paste("Logistic Regression RMSE: ", mean(glm_cv_rmse), "(+/-)", sd(glm_cv_rmse)))
+
+  # Importance plot
+glm_mean_importance <- data.frame(rowMeans(glm_cv_importance, na.rm=TRUE))
+vi3 <- ggplot(glm_mean_importance, 
+             aes(x=row.names(glm_mean_importance), 
+                  y=rowMeans(glm_cv_importance, na.rm=TRUE))) +
+         geom_bar(stat="identity") +
+         labs(title="GLM Variable Importance",
+              x = "Variables", y="Variable Importance") +
+         geom_errorbar(aes(ymin = glm_mean_importance - 
+                             apply(glm_cv_importance, 1, function(x) {sd(x, na.rm=TRUE)}),
+                           ymax = glm_mean_importance + 
+                             apply(glm_cv_importance, 1, function(x) {sd(x, na.rm=TRUE)}))) +
+          coord_flip()
+vi3
+
+model_eval <- data.frame(RMSE = integer(4), ProcessTime = integer(4))
+model_eval$RMSE <- c(sprintf("%.3f(+/-)%.3f", mean(rf_cv_rmse), sd(rf_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(gbm_cv_rmse), sd(gbm_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(sp2_cv_rmse), sd(sp2_cv_rmse)),
+                  sprintf("%.3f(+/-)%.3f", mean(glm_cv_rmse), sd(glm_cv_rmse)))
+
+model_eval$ProcessTime <- c(rf_time[3], gbm_time[3], sp2_time[3], glm_time[3])
+rownames(model_eval) <- c("Random Forest", "Gradient Boosting", 
+                          "Smoothing Spline", "Generalized Linear Model")
+
+kable(model_eval)
+
+vi1
+vi2
+vi3
+```
+
+\newpage
+# References
+P. Cortez and A. Morais. A Data Mining Approach to Predict Forest Fires using Meteorological Data. 
+  In J. Neves, M. F. Santos and J. Machado Eds., New Trends in Artificial Intelligence, 
+  Proceedings of the 13th EPIA 2007 - Portuguese Conference on Artificial Intelligence, December, 
+  Guimaraes, Portugal, pp. 512-523, 2007. APPIA, ISBN-13 978-989-95618-0-9. 
+  Available at: http://www.dsi.uminho.pt/~pcortez/fires.pdf
+
